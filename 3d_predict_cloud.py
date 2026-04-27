@@ -31,6 +31,8 @@ WANNENG_POOL = [
 ]
 
 API_URL = "https://www.cwl.gov.cn/cwl_admin/front/cwlkj/search/kjxx/findDrawNotice"
+# 备用数据源：500彩票网 福彩3D 历史
+URL_500_HISTORY = "https://datachart.500.com/sd/history/newinc/history.php?limit={n}&sort=0"
 
 # 北京时间
 BJ_TZ = timezone(timedelta(hours=8))
@@ -39,7 +41,44 @@ BJ_TZ = timezone(timedelta(hours=8))
 # ============================================================
 # 数据爬取
 # ============================================================
-def fetch_recent_draws(n=20):
+def fetch_from_500(n=20):
+    """从500彩票网爬最近n期"""
+    import re
+    url = URL_500_HISTORY.format(n=n)
+    headers = {
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/120.0.0.0 Safari/537.36"),
+        "Referer": "https://datachart.500.com/sd/history/history.shtml",
+    }
+    resp = requests.get(url, headers=headers, timeout=30)
+    resp.encoding = 'gb2312'  # 500.com是gb2312编码
+    html = resp.text
+
+    # 提取表格行：每一行格式形如
+    # <tr class="t_tr1"><td class="t_tr1">2026106</td><td>9</td><td>4</td><td>0</td>...
+    # 或不带class的tr
+    rows = re.findall(
+        r'<tr[^>]*>\s*<td[^>]*>(\d{7})</td>\s*<td[^>]*>(\d)</td>\s*<td[^>]*>(\d)</td>\s*<td[^>]*>(\d)</td>',
+        html
+    )
+    if not rows:
+        raise RuntimeError(f"500.com 解析失败，响应长度={len(html)}")
+
+    # 500.com默认按期号倒序，转正序
+    rows = list(reversed(rows[:n]))
+    draws = []
+    for period, b, s, g in rows:
+        draws.append({
+            "period": period,
+            "date": "",  # 500.com这个接口不直接给日期，下面计算
+            "nums": (int(b), int(s), int(g))
+        })
+    return draws
+
+
+def fetch_from_cwl(n=20):
+    """从福彩官网爬（备用，国内可用）"""
     headers = {
         "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                        "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -69,6 +108,24 @@ def fetch_recent_draws(n=20):
             "nums": (b, s, g)
         })
     return draws
+
+
+def fetch_recent_draws(n=20):
+    """先尝试500.com，失败回退到福彩官网"""
+    errors = []
+    for source_name, fetch_func in [("500.com", fetch_from_500),
+                                     ("福彩官网", fetch_from_cwl)]:
+        try:
+            print(f"📡 尝试从 {source_name} 爬取数据...")
+            draws = fetch_func(n)
+            if draws:
+                print(f"✅ {source_name} 爬取成功，{len(draws)} 期")
+                return draws
+        except Exception as e:
+            err_msg = f"{source_name}: {type(e).__name__}: {e}"
+            print(f"⚠️  {err_msg}")
+            errors.append(err_msg)
+    raise RuntimeError(f"所有数据源都失败：\n" + "\n".join(errors))
 
 
 # ============================================================
@@ -276,7 +333,8 @@ def build_markdown_message(predictions, draws):
     for d in draws[-5:]:
         n = d['nums']
         form = get_form(n)
-        lines.append(f"- {d['period']} ({d['date']}): **{n[0]}{n[1]}{n[2]}** [{form}]")
+        date_str = f"({d['date']})" if d.get('date') else ""
+        lines.append(f"- {d['period']} {date_str}: **{n[0]}{n[1]}{n[2]}** [{form}]")
     lines.append("")
 
     # 形态分析
